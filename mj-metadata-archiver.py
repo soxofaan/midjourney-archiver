@@ -1,4 +1,12 @@
+#!/usr/bin/env python
+"""
+Python command line tool to download Midjourney job metadata:
+- text file with prompt used for each job
+- JSON dump with full job metadata listing
+"""
+
 import collections
+
 import datetime as dt
 import itertools
 import json
@@ -10,10 +18,10 @@ from typing import List, Optional, Union
 
 import requests
 
-_log = logging.getLogger("midjourney-archiver")
+_log = logging.getLogger("mj-metadata-archiver")
 
 
-class MetadataArchiver:
+class MidjourneyMetadataArchiver:
     _text_wrapper = textwrap.TextWrapper(
         width=80,
         initial_indent=" " * 4,
@@ -26,6 +34,7 @@ class MetadataArchiver:
         self.archive_root = archive_root
         self.user_id = user_id
         self.session_token = session_token
+        self.stats = collections.Counter()
 
     def request_recent_jobs(
         self,
@@ -34,6 +43,9 @@ class MetadataArchiver:
         page: Optional[int] = None,
         amount: int = 50,
     ) -> List[dict]:
+        """
+        Do `recent-jobs` request to midjourney API
+        """
         url = "https://www.midjourney.com/api/app/recent-jobs/"
         params = {
             "amount": amount,
@@ -57,29 +69,31 @@ class MetadataArchiver:
         resp.raise_for_status()
         assert resp.headers["Content-Type"].startswith("application/json")
         job_listing = resp.json()
-        if isinstance(job_listing, list):
-            if len(job_listing) > 0:
-                if isinstance(job_listing[0], dict):
-                    if all(
-                        f in job_listing[0] for f in ["id", "enqueue_time", "prompt"]
-                    ):
-                        _log.info(f"Got job listing with {len(job_listing)} jobs")
-                        return job_listing
-                    if job_listing[0] == {"msg": "No jobs found."}:
-                        _log.info(f"Response: 'No jobs found'")
-                        return []
+        if (
+            isinstance(job_listing, list)
+            and len(job_listing) > 0
+            and isinstance(job_listing[0], dict)
+        ):
+            if all(f in job_listing[0] for f in ["id", "enqueue_time", "prompt"]):
+                _log.info(f"Got job listing with {len(job_listing)} jobs")
+                return job_listing
+            if job_listing[0] == {"msg": "No jobs found."}:
+                _log.info(f"Response: 'No jobs found'")
+                return []
         raise ValueError(job_listing)
 
     def crawl(
         self,
         limit: Optional[int] = None,
         job_type: Union[str, None] = "upscale",
-        from_date: Optional[str] = None
+        from_date: Optional[str] = None,
     ):
+        """
+        Crawl the Midjourney API to collect job metadata
+        """
         # TODO: option to get from_date from existing archive?
         # TODO: there seems to be a hard limit of 2500 items in total job listing
         pages = range(1, limit + 1) if limit else itertools.count(1)
-        stats = collections.Counter()
         for page in pages:
             _log.info(f"Crawling for job info batch {page=}")
             job_listing = self.request_recent_jobs(
@@ -88,38 +102,36 @@ class MetadataArchiver:
             if not job_listing:
                 _log.info("Empty job listing batch: reached end of total job listing")
                 break
-            self.archive_job_listing(job_listing, stats=stats)
+            self.archive_job_listing(job_listing)
             # TODO: option to stop crawling if listing was already fully archived
 
             # Get "fromDate" for consistent paging in next requests.
             if from_date is None:
                 from_date = job_listing[0]["enqueue_time"]
-        _log.info(f"Finished crawling: {stats=}")
 
-    def archive_job_listing(
-        self, job_listing: List[dict], stats: Optional[dict] = None
-    ):
+    def archive_job_listing(self, job_listing: List[dict]):
         for job_info in job_listing:
-            self.archive_job_info(job_info, stats=stats)
+            self.archive_job_info(job_info)
 
-    def archive_job_info(self, job_info: dict, stats: Optional[dict] = None):
+    def archive_job_info(self, job_info: dict):
         job_id = job_info["id"]
         enqueue_time = job_info["enqueue_time"]
         _log.info(f"Archiving metadata of job {job_id} ({enqueue_time=})")
 
-        if stats is not None:
-            stats["job"] += 1
-            stats[f"job type={job_info['type']}"] += 1
+        self.stats["job"] += 1
+        self.stats[f"job type={job_info['type']}"] += 1
 
-        date = dt.datetime.strptime(enqueue_time.split(" ")[0], "%Y-%m-%d").date()
-        job_dir = self.archive_root / date.strftime("%Y/%Y-%m/%Y-%m-%d")
+        enqueue_time = dt.datetime.strptime(enqueue_time, "%Y-%m-%d %H:%M:%S.%f")
+        job_dir = self.archive_root / enqueue_time.strftime("%Y/%Y-%m/%Y-%m-%d")
         job_dir.mkdir(parents=True, exist_ok=True)
         # Store raw metadata as JSON file
         # TODO: option to not/force overwriting existing metadata files?
-        with (job_dir / f"{job_id}.json").open("w") as f:
+        filename_base = f"{enqueue_time.strftime('%Y%m%d-%H%M%S')}_{job_id}"
+        with (job_dir / f"{filename_base}.json").open("w") as f:
+            # TODO: option to set indent/compactness?
             json.dump(job_info, f, indent=2)
         # Store prompt info as text file
-        with (job_dir / f"{job_id}.prompt.txt").open("w") as f:
+        with (job_dir / f"{filename_base}.prompt.txt").open("w") as f:
             f.write("Prompt:\n")
             f.write(self._text_wrapper.fill(job_info["prompt"]) + "\n")
             f.write("\nFull command:\n")
@@ -130,20 +142,26 @@ def main():
     logging.basicConfig(level=logging.INFO)
 
     # TODO: real CLI user interface
-    download_dir = Path.cwd() / "jobs"
+    archive_root = Path.cwd() / "mj-archive"
     user_id = os.environ.get("MIDJOURNEY_USER_ID") or input("user id:")
-    session_token = os.environ.get("MIDJOURNEY_SESSION_TOKEN") or input("session token:")
-
-    metadata_archiver = MetadataArchiver(
-        archive_root=download_dir, user_id=user_id, session_token=session_token
+    session_token = os.environ.get("MIDJOURNEY_SESSION_TOKEN") or input(
+        "session token:"
     )
 
-    metadata_archiver.crawl(
-        limit=5,
-        # limit=None,
-        job_type=None,
+    metadata_archiver = MidjourneyMetadataArchiver(
+        archive_root=archive_root, user_id=user_id, session_token=session_token
     )
-    return True
+    try:
+        metadata_archiver.crawl(
+            limit=10,
+            # limit=None,
+            # job_type=None,
+            job_type="upscale",
+        )
+    except KeyboardInterrupt:
+        _log.info("Caught KeyboardInterrupt")
+
+    _log.info(f"Crawling stats: {metadata_archiver.stats}")
 
 
 if __name__ == "__main__":

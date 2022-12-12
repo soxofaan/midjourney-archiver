@@ -11,6 +11,7 @@ read MIDJOURNEY_USER_ID
 echo "7. Go to Application > Cookies > https://www.midjourney.com"
 echo "8. Find the entry __Secure-next-auth.session-token"
 echo "9. Copy its value and paste it below, then press Enter:"
-read MIDJOURNEY_SESSION_TOKEN 
+read -e MIDJOURNEY_SESSION_TOKEN 
+echo "Thanks! Now downloading..."
 ./mj-metadata-archiver.py
 ./mj-downloader.py

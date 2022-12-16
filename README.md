@@ -82,7 +82,7 @@ organised per date.
 Walk through the downloaded metadata archive
 and download the full referenced images of (upscale) jobs:
 
-      ./mj-downloader.py
+      python mj-downloader.py
 
 
 ## License
